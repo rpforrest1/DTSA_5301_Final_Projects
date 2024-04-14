@@ -1,0 +1,248 @@
+---
+title: "NYPD Shooting Incident Report"
+author: "Robert Forrest"
+date: "April 11th 2024"
+output: pdf_document
+---
+
+```{r setup}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(lubridate)
+```
+## Intro
+
+In this report I will import and clean the NYPD shooting incident data and then 
+do some analysis. Afterwards I will create a model that will predict the number
+of shootings expected.
+
+
+## Import Data
+Reads in the data from the government dataset catalog website.
+```{r importing}
+data <- read_csv("https://data.cityofnewyork.us/api/views/833y-fsy8/rows.csv",
+                 show_col_types = FALSE)
+summary(data)
+```
+
+
+## Tidy and Transform
+To clean the data, I will drop columns that I'm not interested in and will fix
+the occur_date column by transforming it into a real date column.
+```{r tidy1}
+data <- data %>%
+  mutate(OCCUR_DATE = mdy(OCCUR_DATE)) %>%
+  select(-c(INCIDENT_KEY, JURISDICTION_CODE, LOC_OF_OCCUR_DESC, LOC_CLASSFCTN_DESC,
+            X_COORD_CD, Y_COORD_CD, Latitude, Longitude, Lon_Lat))
+print(names(data))
+```
+
+
+Look at unique values in order to do some potential replacements.
+``` {r tidy2}
+# These are the only columns I want to look at for unique values.
+columns_to_check <- setdiff(names(data), c("OCCUR_DATE", "OCCUR_TIME", "PRECINCT"))
+
+# Custom function to display counts of unique values in each column
+print_unique_counts <- function(df) {
+  for (col in names(df)) {
+    cat("Column:", col, "\n")
+    cat("------------\n")
+    counts <- table(df[[col]])
+    for (val in names(counts)) {
+      cat(val, ": ", counts[val], "\n")
+    }
+    cat("\n")
+  }
+}
+
+print_unique_counts(data[columns_to_check])
+```
+
+
+Next I will replace empty string data or unknown-like/messy data with "UNKNOWN".
+```{r tidy3}
+# Define function to handle replacement unknown-like values
+replace_with_unknown <- function(x) {
+  ifelse(x == "" | x == "(null)" | is.na(x) | x == "U" | x == "1022" | x == "1020"
+         | x == "940" | x == "224", "UNKNOWN", x)
+}
+
+data <- data %>%
+  mutate(across(all_of(columns_to_check), ~ replace_with_unknown(.)))
+
+print_unique_counts(data[columns_to_check])
+```
+
+
+Next I'll add some more columns of interest.
+``` {r tidy4}
+data <- data %>%
+  mutate(DAY_OF_WEEK = wday(OCCUR_DATE, label = TRUE, abbr = FALSE)) %>%
+  mutate(DAYS_SINCE_DATA_START = as.numeric(OCCUR_DATE - min(data$OCCUR_DATE)))
+
+data_start_date = format(min(data$OCCUR_DATE), "%Y-%m-%d")
+
+cat("Data start date=", data_start_date)
+```
+
+
+## Visualization and Analysis
+This is a plot of the number of shootings by Borough.
+``` {r vis1}
+event_counts_boro <- data %>%
+  group_by(BORO) %>%
+  summarise(NUM_SHOOTINGS = n())
+
+ggplot(event_counts_boro, aes(x = BORO, y = NUM_SHOOTINGS)) +
+  geom_bar(stat = "identity", fill = "lightblue", color = "black") +
+  labs(title = "Number of Shootings by Borough",
+       x = "Borough",
+       y = "Number of Shootings") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+So here we see that Brooklyn has the highest number of shootings and Staten Island
+has the lowest. Its possible that the differences are related to the population,
+so further analysis would be required in order to rule that possibility out.
+
+
+This is a plot of the number of shootings by day of the week.
+``` {r vis2}
+event_counts_day <- data %>%
+  group_by(DAY_OF_WEEK) %>%
+  summarise(NUM_SHOOTINGS = n())
+
+ggplot(event_counts_day, aes(x = DAY_OF_WEEK, y = NUM_SHOOTINGS)) +
+  geom_bar(stat = "identity", fill = "lightgreen", color = "black") +
+  labs(title = "Number of Shootings by Day of the Week",
+       x = "Day of the Week",
+       y = "Number of Shootings") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+It looks like the weekends are when shootings happen the most. I suspect that its
+due to people being more "free" during the weekends typically. Or if these are
+happening at night, people are more likely to me active during weekend nights vs
+weekday nights.
+
+
+Plot the cumulative number of events over time.
+``` {r vis3}
+event_counts_cumu <- data %>%
+  group_by(OCCUR_DATE) %>%
+  summarise(NUM_SHOOTINGS = n()) %>%
+  arrange(OCCUR_DATE) %>%
+  mutate(CUMULATIVE_SHOOTINGS = cumsum(NUM_SHOOTINGS))
+
+ggplot(event_counts_cumu, aes(x = OCCUR_DATE, y = CUMULATIVE_SHOOTINGS)) +
+  geom_line(color = "blue") +
+  labs(title = "Cumulative Number of Shootings Over Time",
+       x = "Date",
+       y = "Total Shootings") +
+  theme_minimal()
+```
+
+Based on the plot above, it looks like the shootings are going up in a straight line.
+This makes me wonder if there are certain age groups that are more at risk. So
+here I will plot a heatmap to understand which groups are involved with the most
+shootings.
+
+``` {r analysis1}
+# Filter out rows where either PERP_AGE_GROUP or VIC_AGE_GROUP is "UNKNOWN"
+filtered_data <- data %>%
+  filter(PERP_AGE_GROUP != "UNKNOWN" & VIC_AGE_GROUP != "UNKNOWN")
+
+# Create a table of counts for each combination of PERP_AGE_GROUP and VIC_AGE_GROUP
+heatmap_data <- table(filtered_data$PERP_AGE_GROUP, filtered_data$VIC_AGE_GROUP)
+
+# Add row and column sums for cumulative counts
+heatmap_data <- addmargins(heatmap_data)
+
+# Plot the heatmap with counts within each cell
+ggplot(as.data.frame(heatmap_data), aes(x = Var2, y = Var1, fill = Freq, label = Freq)) +
+  geom_tile(color = "white") +
+  scale_fill_gradient(low = "white", high = "red") +
+  geom_text(color = "black") +
+  labs(title = "Shootings Heatmap",
+       x = "Victim Age Group",
+       y = "Perpetrator Age Group") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),
+        plot.title = element_text(hjust = 0.5))
+```
+These results tell us that the perpetrator group causing the most shootings are
+the 18-24 year olds. They mostly go after other 18-24 year olds. The group most
+victimized are the 25-44 year olds. They are mostly victimized by other 25-44 year
+olds. Contrary to what one might think, the older people (45+) are not victims as often
+as younger people.
+
+
+## Model
+Create a model to predict the total number of shootings, based on the data start date.
+``` {r model1}
+event_counts_for_model <- data %>%
+  group_by(DAYS_SINCE_DATA_START, BORO, PRECINCT, VIC_AGE_GROUP, PERP_AGE_GROUP) %>%
+  summarise(NUM_SHOOTINGS = n(), .groups = "drop") %>%
+  arrange(DAYS_SINCE_DATA_START) %>%
+  mutate(CUMULATIVE_SHOOTINGS = cumsum(NUM_SHOOTINGS))
+
+
+mod <- lm(CUMULATIVE_SHOOTINGS ~ DAYS_SINCE_DATA_START, data= event_counts_for_model %>%
+ filter(PERP_AGE_GROUP != "UNKNOWN" & VIC_AGE_GROUP != "UNKNOWN"))
+
+summary(mod)
+```
+The results from the linear model look good. The p-value is < 0.05 and the 
+R-squared is close to 1.
+
+
+Visualize the predicted shootings vs actual shootings.
+``` {r model2}
+# Create a data frame for predictions with the same structure as event_counts_for_model
+new_data <- data.frame(DAYS_SINCE_DATA_START = event_counts_for_model$DAYS_SINCE_DATA_START)
+
+# Add a column for the predicted values
+event_counts_for_model$predicted <- predict(mod, newdata = new_data)
+
+# Now can plot and see actual vs predicted
+event_counts_for_model %>% 
+  ggplot() +
+  geom_point(aes(x = DAYS_SINCE_DATA_START, y = CUMULATIVE_SHOOTINGS, color = "Actual")) +
+  geom_point(aes(x = DAYS_SINCE_DATA_START, y = predicted, color = "Predicted")) +
+  labs(title = "Actual vs Predicted Shootings",
+       x = paste("Days since", data_start_date),
+       y = "Cumulative Shootings") +
+  scale_color_manual(values = c("Actual" = "blue", "Predicted" = "red"),
+                     labels = c("Actual", "Predicted")) +
+  guides(color = guide_legend(title = "Legend"))
+```
+
+
+## Conclusions and Bias Identification
+In conclusion, there are areas in New York that are more dangerous than others.
+The primary victims and perpetrators are from 2 different age groups, but are
+still rather close in age. There unfortunately doesn't appear to be a noticeable
+decrease in shootings over time.
+
+A source of bias that I have when analyzing this data is in how I handled missing
+or unknown values. I decided to make all missing and unknown values equal to "UNKNOWN".
+This means that my analysis and model could greatly under represent reality if it
+turns out that the most important shootings are originating from the "UNKNOWN"
+category.
+
+A source of bias from this data, would be due to the shootings only originating
+from New York. There is almost a universal mindset that New York can be particularly
+dangerous. Therefore, its important to keep in mind that the data collected here
+and the associated model, should not be used for other cities. Also, this only
+has data reported from NYPD. There could be many shootings happening that go
+unreported or that are in a different police district.
+
+Due to these biases, its important to mitigate them by having the audience
+understand that they exist and to gather data from other sources before making
+further conclusions.
+
+## Show Session Info
+``` {r info}
+sessionInfo()
+```

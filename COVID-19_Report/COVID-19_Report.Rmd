@@ -1,0 +1,224 @@
+---
+title: "COVID-19 Report"
+author: "Robert Forrest"
+date: "April 11th 2024"
+output: pdf_document
+---
+
+```{r setup}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(lubridate)
+```
+
+## Intro
+In this report, I'll be taking at look at US COVID-19 data from John Hopkins University.
+The data can be found hosted on their github here: https://github.com/CSSEGISandData/COVID-19.
+In it contains the number of cases and deaths for each date for all states in the US.
+I will perform some tidying of the data, data visualizations with analysis, create
+a model and go through some conclusions. I am interested in exploring how the 
+cases and deaths trended over time for the US as well as how deadly the virus was.
+
+
+## Import Data
+Read in 2 csv files from John Hopkin's github repo.
+```{r importing}
+url_in <- "https://raw.githubusercontent.com/CSSEGISandData/COVID-19/master/csse_covid_19_data/csse_covid_19_time_series/"
+file_names <- c("time_series_covid19_confirmed_US.csv", 
+                "time_series_covid19_deaths_US.csv")
+
+urls <- str_c(url_in, file_names)
+
+# read data in
+us_cases <- read_csv(urls[1], show_col_types = FALSE)
+us_deaths <- read_csv(urls[2], show_col_types = FALSE)
+```
+
+
+## Tidy and Transform
+To clean the data, I will transform the data from a wide format into a long format.
+This will allow for better analysis later on. I will also drop some unnecessary
+columns and create some new columns.
+``` {r tidy1}
+
+us_cases_by_state <- us_cases %>%
+	pivot_longer(cols = -c(UID, iso2, iso3, code3, FIPS, Admin2, Province_State,
+	                       Country_Region, Lat, Long_, Combined_Key),
+							names_to = "date",
+							values_to = "cases") %>%
+  mutate(date = mdy(date)) %>%
+  select(-c(UID, iso2, iso3, code3, FIPS, Admin2, Country_Region, Lat, Long_,
+            Combined_Key)) %>%
+  group_by(Province_State, date) %>%
+  summarize(cases = sum(cases), .groups = 'keep')
+
+
+us_deaths_by_state <- us_deaths %>%
+	pivot_longer(cols = -c(UID, iso2, iso3, code3, FIPS, Admin2, Province_State,
+	                       Country_Region, Lat, Long_, Combined_Key, Population),
+							names_to = "date",
+							values_to = "deaths") %>%
+  mutate(date = mdy(date)) %>%
+  select(-c(UID, iso2, iso3, code3, FIPS, Admin2, Country_Region, Lat, Long_,
+            Combined_Key, Population)) %>%
+  group_by(Province_State, date) %>%
+  summarize(deaths = sum(deaths), .groups = 'keep')
+```
+
+Here I will combine the data for cases and deaths into a single table. I will
+also add a deaths_per_cases column.
+``` {r tidy2}
+us_all_data <- us_cases_by_state %>%
+  full_join(us_deaths_by_state, by=c("Province_State", "date")) %>%
+  mutate(deaths_per_cases = deaths / cases)
+```
+
+Its important to get rid of any potentially bad data. Here I will make sure that
+the deaths_per_cases do not exceed 1.
+``` {r tidy3}
+us_all_data <- us_all_data %>%
+  filter(deaths_per_cases < 1) %>%
+  arrange(Province_State, date)
+```
+
+
+## Visualization and Analysis
+Lets take a look at the top 5 states with the most cases and deaths.
+``` {r vis1}
+cases_and_deaths_by_state <- us_all_data %>%
+  group_by(Province_State) %>%
+  summarise(total_cases = sum(cases), total_deaths = sum(deaths)) %>%
+  arrange(desc(total_cases))
+
+# This one is sorted by cases
+head(cases_and_deaths_by_state, 5)
+
+# This one is sorted by deaths
+head(cases_and_deaths_by_state %>% arrange(desc(total_deaths)), 5)
+
+```
+From the results, California had the most cases and deaths. Lets take a look
+at how California's cases and deaths trended over time.
+
+``` {r vis2}
+ggplot(data = subset(us_all_data, Province_State == "California"),
+       aes(x = date, y = cases)) +
+  geom_line() +
+  labs(x = "Date", y = "Cases", title = "COVID-19 Cases in California Over Time")
+```
+Its interesting to see that were appears to be 2 major spikes in the number of
+cases near the end of 2020 and the beginning of 2022. I believe this could be
+due to the heavy amount of holiday traveling going on around those times.
+
+``` {r vis3}
+ggplot(data = subset(us_all_data, Province_State == "California"),
+       aes(x = date, y = deaths)) +
+  geom_line() +
+  labs(x = "Date", y = "Deaths", title = "COVID-19 Deaths in California Over Time")
+```
+When taking at look the deaths, it makes sense that given the large amount of
+cases near 2021, that there would also be a spike in the deaths. The vaccine was
+not widely available in time to prevent the deaths. When comparing the second
+spike in cases in 2022, we don't see such a drastic increase in deaths, which
+is most likely due to people either having the vaccine already or they may have
+already gotten sick prior.
+
+Here we will take a look at the number of deaths per cases over time. This will
+allow us to understand how deadly the virus was in California.
+``` {r vis4}
+ggplot(data = subset(us_all_data, Province_State == "California"),
+       aes(x = date, y = deaths_per_cases)) +
+  geom_line() +
+  labs(x = "Date", y = "Deaths per Cases", title = "COVID-19 Deaths per Cases in California Over Time")
+```
+
+Next, lets took at the US as a whole to understand how the deaths per cases is
+trending over time.
+``` {r vis5}
+us_cases_and_deaths_by_date <- us_all_data %>%
+  group_by(date) %>%
+  summarise(total_cases = sum(cases), total_deaths = sum(deaths)) %>%
+  mutate(deaths_per_cases = total_deaths / total_cases) %>%
+  filter(deaths_per_cases < 1)
+
+ggplot(us_cases_and_deaths_by_date,
+       aes(x = date, y = deaths_per_cases)) +
+  geom_line() +
+  labs(x = "Date", y = "Deaths per Cases", title = "COVID-19 Deaths per Cases in the US Over Time")
+```
+It looks like when using at the entire United States, the trend is similar
+to what happened in California. The virus appears very deadly in the beginning
+but sometime after 2022, it begins to consistently stay lower.
+
+Finally, lets see if the number of cases have any relationship with the number
+of deaths. A model will be created for it later.
+``` {r vis6}
+ggplot(us_cases_and_deaths_by_date,
+       aes(x = total_cases, y = total_deaths)) +
+  geom_line() +
+  labs(x = "Total Cases", y = "Total Deaths", title = "COVID-19 Deaths vs Cases in the US")
+```
+It looks like there is a relationship. So as the number of cases increases, the
+number of deaths do as well.
+
+
+## Model
+Now a model will be created that will attempt to predict the total number of
+deaths, based on the total number of cases.
+``` {r model1}
+mod <- lm(total_deaths ~ total_cases, data= us_cases_and_deaths_by_date)
+
+summary(mod)
+```
+The results from the linear model look good. The p-value is < 0.05 and the 
+R-squared is close to 1.
+
+Now we can visualize the actual vs predicted deaths.
+``` {r model2}
+us_cases_and_deaths_by_date <- us_cases_and_deaths_by_date %>% mutate(pred_deaths=predict(mod))
+
+us_cases_and_deaths_by_date %>%
+  ggplot() +
+  geom_point(aes(x = total_cases, y = total_deaths, color = "Actual")) +
+  geom_point(aes(x = total_cases, y = pred_deaths, color = "Predicted")) +
+  labs(title = "Actual vs Predicted Deaths",
+       x = "Total Cases",
+       y = "Total Deaths") +
+  scale_color_manual(values = c("Actual" = "blue", "Predicted" = "red"),
+                     labels = c("Actual", "Predicted")) +
+  guides(color = guide_legend(title = "Legend"))
+
+```
+The model appears to fit well enough, but isn't very good at the extreme ends
+of the range or the middle. This is likely cause by external factors such as
+vaccines since the cases can increase drastically without leading to more deaths.
+
+
+## Conclusions and Bias Identification
+In conclusion, COVID-19 started off a very deadly disease but as time went
+on and we learned more about its behavior, we were able to reduce its deadliness.
+Vaccines were also a likely contributor to the drastic decrease in deaths and
+cases. We did not experience an increase in deaths or cases near the beginning
+of 2023 like what was experienced for the past 2 years.
+
+One source of bias in this data would be in how the data was gathered. The cases
+would be under represented by some amount since not everyone will report that they
+got the virus and would have likely just stayed at home. The number of deaths
+have a better chance of being more correct since any cause of death would eventually
+be reported. 
+
+In my analysis, I also only looked at the US since that is where I am based. The
+virus could have a wildly different behavior or outcome if it was in another
+country. John Hopkins does have more data on COVID-19 from other countries available.
+There could also be a misrepresentation of cases and deaths in this data since
+countries have different reporting practices.
+
+Something else to keep in mind when thinking about bias, is that more populated
+areas would naturally have more cases and deaths. Data that is aggregated at the 
+state level, may not be representative for someone in a less populated location of
+that same state.
+
+## Show Session Info
+``` {r info}
+sessionInfo()
+```
